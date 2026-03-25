@@ -30,8 +30,9 @@ def _():
 @app.cell
 def _():
     import altair as alt
+    import pandas as pd
 
-    return (alt,)
+    return alt, pd
 
 
 @app.cell
@@ -266,18 +267,18 @@ def _(BOS, block_size, docs, gpt, mo, n_layer, params, softmax, uchars):
         learning_rate, beta1, beta2, eps_adam = 0.01, 0.85, 0.99, 1e-8
         m = [0.0] * len(params) # first moment buffer
         v = [0.0] * len(params) # second moment buffer
-    
+
         # Repeat in sequence
         num_steps = 1000 # number of training steps
         loss_history = []
         with mo.status.progress_bar(total=num_steps) as bar:
             for step in range(num_steps):
-        
+
                 # Take single document, tokenize it, surround it with BOS special token on both sides
                 doc = docs[step % len(docs)]
                 tokens = [BOS] + [uchars.index(ch) for ch in doc] + [BOS]
                 n = min(block_size, len(tokens) - 1)
-        
+
                 # Forward the token sequence through the model, building up the computation graph all the way to the loss
                 keys, values = [[] for _ in range(n_layer)], [[] for _ in range(n_layer)]
                 losses = []
@@ -288,10 +289,10 @@ def _(BOS, block_size, docs, gpt, mo, n_layer, params, softmax, uchars):
                     loss_t = -probs[target_id].log()
                     losses.append(loss_t)
                 loss = (1 / n) * sum(losses) # final average loss over the document sequence. May yours be low.
-    
+
                 # Backward the loss, calculating the gradients with respect to all model parameters
                 loss.backward()
-        
+
                 # Adam optimizer update: update the model parameters based on the corresponding gradients
                 lr_t = learning_rate * (1 - step / num_steps) # linear learning rate decay
                 for i, p in enumerate(params):
@@ -301,7 +302,7 @@ def _(BOS, block_size, docs, gpt, mo, n_layer, params, softmax, uchars):
                     v_hat = v[i] / (1 - beta2 ** (step + 1))
                     p.data -= lr_t * m_hat / (v_hat ** 0.5 + eps_adam)
                     p.grad = 0
-                loss_history.append(loss)
+                loss_history.append(loss.data)
                 bar.update(title=f"Loss: {loss.data:.4f}")
         return {"losses": loss_history}            
 
@@ -317,16 +318,36 @@ def _(params, train):
 
 
 @app.cell
-def _(alt, training):
+def _(alt, pd, training):
     losses = training["losses"]
 
-    data = [{"step": i+1, "loss": loss} for i, loss in enumerate(losses)]
+    df = pd.DataFrame({"step": i+1, "loss": loss} for i, loss in enumerate(losses))
+    window = 200
+    df["loss_avg"] = df["loss"].rolling(window).mean()
 
-    chart = alt.Chart(data).mark_line().encode(
-        x="step",
-        y="loss"
+    mean = df["loss"].mean()
+    std = df["loss"].std()
+
+    y_scale = alt.Scale(domain=[mean-std, mean+std], clamp=True)
+
+    color_scale = alt.Scale(
+        domain=["loss", f"loss (average {window})"],
+        range=["lightgray", "steelblue"]
     )
 
+    line = alt.Chart(df).mark_line(strokeOpacity=0.5).encode(
+        x="step",
+        y=alt.Y("loss:Q", scale=y_scale),
+        color=alt.datum("loss", scale=color_scale),
+    )
+
+    avg_line = alt.Chart(df).mark_line().encode(
+        x="step",
+        y=alt.Y("loss_avg:Q", scale=y_scale),
+        color=alt.datum(f"loss (average {window})", scale=color_scale),
+    )
+
+    chart = (line + avg_line).properties(width="container", height=400)
     chart
     return
 
